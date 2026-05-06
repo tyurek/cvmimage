@@ -16,35 +16,71 @@ import (
 )
 
 const (
-	nvattestTimeout   = 5 * time.Minute
-	nvidiaVendorID    = "0x10de"
-	multiGPUThreshold = 12 // 8 GPUs + 4 NVSwitches
+	nvattestTimeout = 5 * time.Minute
+	nvidiaVendorID  = "0x10de"
+	nvidiaGPUClass  = "0x030200" // 3D controller
+	gpuDeviceIDH100 = "0x2331"
+	gpuDeviceIDH200 = "0x2335"
+	gpuDeviceIDB200 = "0x2901"
 )
 
-// detectGPUCount scans PCI devices and returns 0, 1, or 8.
-func detectGPUCount() (int, error) {
-	pciPath := "/sys/bus/pci/devices"
+// forEachNVIDIAGPU iterates over PCI devices that are NVIDIA GPUs
+// (vendor 0x10de + 3D-controller class), invoking fn with each device's
+// sysfs entry name. Walking stops if fn returns false.
+func forEachNVIDIAGPU(fn func(entryName string) bool) error {
+	const pciPath = "/sys/bus/pci/devices"
 	entries, err := os.ReadDir(pciPath)
 	if err != nil {
-		return 0, fmt.Errorf("reading PCI devices: %w", err)
+		return fmt.Errorf("reading PCI devices: %w", err)
 	}
-	count := 0
 	for _, entry := range entries {
-		data, err := os.ReadFile(filepath.Join(pciPath, entry.Name(), "vendor"))
-		if err != nil {
+		vendor, err := os.ReadFile(filepath.Join(pciPath, entry.Name(), "vendor"))
+		if err != nil || strings.TrimSpace(string(vendor)) != nvidiaVendorID {
 			continue
 		}
-		if strings.TrimSpace(string(data)) == nvidiaVendorID {
-			count++
+		class, err := os.ReadFile(filepath.Join(pciPath, entry.Name(), "class"))
+		if err != nil || strings.TrimSpace(string(class)) != nvidiaGPUClass {
+			continue
+		}
+		if !fn(entry.Name()) {
+			return nil
 		}
 	}
-	if count >= multiGPUThreshold {
-		return 8, nil
+	return nil
+}
+
+// detectGPUCount returns the number of NVIDIA 3D-controller PCI devices
+// in the guest. The caller validates against the config-declared count.
+func detectGPUCount() (int, error) {
+	count := 0
+	if err := forEachNVIDIAGPU(func(string) bool { count++; return true }); err != nil {
+		return 0, err
 	}
-	if count > 0 {
-		return 1, nil
-	}
-	return 0, nil
+	return count, nil
+}
+
+// detectGPUArch returns "h100", "h200", "b200", or "" from the first GPU.
+func detectGPUArch() (string, error) {
+	const pciPath = "/sys/bus/pci/devices"
+	var arch string
+	err := forEachNVIDIAGPU(func(entryName string) bool {
+		device, err := os.ReadFile(filepath.Join(pciPath, entryName, "device"))
+		if err != nil {
+			return true
+		}
+		switch strings.TrimSpace(string(device)) {
+		case gpuDeviceIDH100:
+			arch = "h100"
+		case gpuDeviceIDH200:
+			arch = "h200"
+		case gpuDeviceIDB200:
+			arch = "b200"
+		default:
+			return true
+		}
+		return false
+	})
+	return arch, err
 }
 
 func runNvattest(device string) error {
@@ -194,20 +230,32 @@ func verifyGPUAttestation(expectedGPUs int) (*GPURawEvidence, error) {
 	evidence.GPU = gpuRaw
 
 	if expectedGPUs > 1 {
-		if err := runNvattest("nvswitch"); err != nil {
-			return nil, err
-		}
-
-		log.Println("Collecting NVSwitch evidence for topology validation")
-		switchReports, switchRaw, err := collectEvidence("nvswitch")
+		arch, err := detectGPUArch()
 		if err != nil {
-			return nil, fmt.Errorf("collecting switch evidence: %w", err)
+			return nil, fmt.Errorf("detecting GPU arch: %w", err)
 		}
-		evidence.Switch = switchRaw
+		switch arch {
+		case "b200":
+			// B200 MPT: NVSwitches are not exposed to the guest.
+			log.Printf("HGX B200 MPT: no in-guest NVSwitch evidence")
 
-		log.Println("Validating PPCIe topology")
-		if err := validateTopology(gpuReports, switchReports); err != nil {
-			return nil, fmt.Errorf("topology validation failed: %w", err)
+		case "h100", "h200", "":
+			if err := runNvattest("nvswitch"); err != nil {
+				return nil, err
+			}
+			log.Println("Collecting NVSwitch evidence for topology validation")
+			switchReports, switchRaw, err := collectEvidence("nvswitch")
+			if err != nil {
+				return nil, fmt.Errorf("collecting switch evidence: %w", err)
+			}
+			evidence.Switch = switchRaw
+			log.Printf("Validating Hopper PPCIe topology (%d GPUs, %d switches)", expectedGPUs, hopperSwitchCount)
+			if err := validateTopology(gpuReports, switchReports, expectedGPUs, hopperSwitchCount); err != nil {
+				return nil, fmt.Errorf("topology validation failed: %w", err)
+			}
+
+		default:
+			return nil, fmt.Errorf("unsupported multi-GPU arch %q for in-guest attestation", arch)
 		}
 	}
 
