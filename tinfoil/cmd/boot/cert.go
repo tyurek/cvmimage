@@ -99,10 +99,10 @@ func obtainCertificate(id *NodeIdentity, att *verifier.Document, shimCfg *shimco
 		var listenPort int
 		if shimCfg.TLSChallengeMode == "http" {
 			httpChallengeDomains = []string{id.Domain}
-			listenPort = shimCfg.ListenPort
+			listenPort = boot.ShimListenPort
 		}
 		mgr, err := tlsutil.NewCertProxyManager(
-			domains, shimCfg.CacheDir, shimCfg.ControlPlane, id.TLSKey,
+			domains, boot.CacheDir, shimCfg.ControlPlane, id.TLSKey,
 			httpChallengeDomains, listenPort, certAuthToken,
 		)
 		if err != nil {
@@ -118,9 +118,9 @@ func obtainCertificate(id *NodeIdentity, att *verifier.Document, shimCfg *shimco
 			dir = lego.LEDirectoryStaging
 		}
 		mgr, err := tlsutil.NewCertManager(
-			domains, shimCfg.Email, shimCfg.CacheDir, dir,
+			domains, shimCfg.Email, boot.CacheDir, dir,
 			tlsutil.ChallengeMode(shimCfg.TLSChallengeMode),
-			shimCfg.ListenPort, id.TLSKey,
+			boot.ShimListenPort, id.TLSKey,
 			cfDNS, cfZone,
 		)
 		if err != nil {

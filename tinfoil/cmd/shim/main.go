@@ -60,7 +60,7 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr: ":443",
+		Addr: fmt.Sprintf(":%d", boot.ShimListenPort),
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if h, ok := handler.Load().(http.Handler); ok {
 				h.ServeHTTP(w, r)
@@ -136,7 +136,7 @@ func upgradeWhenReady(handler *atomic.Value, cert *atomic.Pointer[tls.Certificat
 		}
 
 		serverIdentity, err := waitForArtifact("HPKE identity", func() (*identity.Identity, error) {
-			return identity.FromFile(config.HPKEKeyFile)
+			return identity.FromFile(boot.HPKEKeyPath)
 		})
 		if err != nil {
 			return err
