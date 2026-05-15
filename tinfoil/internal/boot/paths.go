@@ -10,19 +10,21 @@ const (
 	AttestationPath = PublicDir + "/attestation.json"
 	MPKDir          = PublicDir + "/mpk"
 
-	// Private — only accessible to boot and shim processes (mode 0700).
+	// Private — only accessible to boot, egress, and shim processes (mode 0700).
 	// Holds CVM-level secrets and material that must never reach a container.
 	TLSDir             = PrivateDir + "/tls"
 	TLSCertPath        = TLSDir + "/cert.pem"
 	TLSKeyPath         = TLSDir + "/key.pem"
 	HPKEKeyPath        = PrivateDir + "/hpke_key.json"
 	ShimConfigPath     = PrivateDir + "/shim.yml"
+	EgressConfigPath   = PrivateDir + "/egress.yml"
 	ExternalConfigPath = PrivateDir + "/external-config.yml"
 	DockerConfigDir    = PrivateDir + "/docker-config"
 	DockerConfigPath   = DockerConfigDir + "/config.json"
 	GCloudKeyPath      = PrivateDir + "/gcloud_key.json"
 	CacheDir           = PrivateDir + "/tfshim-cache"
 	StatePath          = PrivateDir + "/boot-state.json"
+	EgressStatePath    = PrivateDir + "/egress-prev"
 
 	// ShimListenPort is the public TLS port served by tinfoil-shim.
 	ShimListenPort = 443

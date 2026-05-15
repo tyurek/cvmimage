@@ -134,6 +134,7 @@ func NewShimServer(
 	tlsCert *tls.Certificate,
 	config *config.Config,
 	externalConfig *config.ExternalConfig,
+	upstreamAddr string,
 ) http.Handler {
 	ehbpMiddleware := ehbpIdentity.Middleware()
 	mux := http.NewServeMux()
@@ -143,7 +144,7 @@ func NewShimServer(
 			originalHost := req.Host
 
 			req.URL.Scheme = "http"
-			req.URL.Host = fmt.Sprintf("127.0.0.1:%d", config.UpstreamPort)
+			req.URL.Host = upstreamAddr
 			req.Header.Set("Host", "localhost")
 			req.Host = "localhost"
 			req.Header.Del(ehbpProtocol.EncapsulatedKeyHeader)

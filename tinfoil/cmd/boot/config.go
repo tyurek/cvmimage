@@ -29,6 +29,14 @@ type Config struct {
 // The shim's listen-port is always allowed implicitly.
 type NetworkConfig struct {
 	AllowedInboundPorts []int `yaml:"allowed-inbound-ports"`
+	// TrustedDomains is an allowlist of hostnames containers may reach over the
+	// public internet. tinfoil-egress resolves each name to one or more IPs at
+	// boot and refreshes every 60s. Cannot be combined with TrustAllDomains.
+	TrustedDomains []string `yaml:"trusted-domains"`
+	// TrustAllDomains opts the enclave into unrestricted public Internet egress.
+	// RFC1918 / link-local destinations remain blocked; only public addresses
+	// are reachable. Cannot be combined with a non-empty TrustedDomains.
+	TrustAllDomains bool `yaml:"trust-all-domains"`
 }
 
 // ModelSpec represents a model pack specification
@@ -59,7 +67,7 @@ type Container struct {
 	CapDrop     []string    `yaml:"cap_drop,omitempty"`
 	SecurityOpt []string    `yaml:"security_opt,omitempty"`
 	Runtime     string      `yaml:"runtime,omitempty"`      // e.g., "nvidia"
-	NetworkMode string      `yaml:"network_mode,omitempty"` // "host", "bridge", "none" (default: "bridge")
+	NetworkMode string      `yaml:"network_mode,omitempty"` // no longer honoured; flagged at parse time so legacy configs fail loud
 	IPC         string      `yaml:"ipc,omitempty"`          // e.g., "host"
 	PidMode     string      `yaml:"pid,omitempty"`          // "host" for host PID namespace
 	GPUs        interface{} `yaml:"gpus,omitempty"`         // "all", "0,1,2,3", or count (int)
@@ -156,6 +164,14 @@ func loadAndVerifyConfig() (*Config, error) {
 	}
 	config.ShimCfg = shimCfg
 
+	if shimCfg.UpstreamContainer == "" && len(config.Containers) > 0 {
+		shimCfg.UpstreamContainer = config.Containers[0].Name
+	}
+
+	if err := validateNetwork(&config); err != nil {
+		return nil, fmt.Errorf("network config: %w", err)
+	}
+
 	shimYAML, err := yaml.Marshal(shimCfg)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling shim config: %w", err)
@@ -164,11 +180,31 @@ func loadAndVerifyConfig() (*Config, error) {
 		return nil, fmt.Errorf("writing shim config: %w", err)
 	}
 
+	if err := writeEgressConfig(&config); err != nil {
+		return nil, fmt.Errorf("writing egress config: %w", err)
+	}
+
 	if err := loadExternalConfig(); err != nil {
 		log.Printf("Warning: external config not loaded: %v", err)
 	}
 
 	return &config, nil
+}
+
+// writeEgressConfig persists just the trusted-domains list to the private
+// ramdisk so tinfoil-egress can load it once at startup. No-op when
+// trusted-domains is empty (the egress service isn't started in that case).
+func writeEgressConfig(cfg *Config) error {
+	if len(cfg.Network.TrustedDomains) == 0 {
+		return nil
+	}
+	data, err := yaml.Marshal(struct {
+		TrustedDomains []string `yaml:"trusted-domains"`
+	}{TrustedDomains: cfg.Network.TrustedDomains})
+	if err != nil {
+		return fmt.Errorf("marshaling: %w", err)
+	}
+	return os.WriteFile(boot.EgressConfigPath, data, 0600)
 }
 
 // loadConfigFromRamdisk reads config directly from ramdisk without verification (for debugging)
@@ -188,6 +224,10 @@ func loadConfigFromRamdisk() (*Config, error) {
 		return nil, fmt.Errorf("parsing shim config: %w", err)
 	}
 	config.ShimCfg = shimCfg
+
+	if err := validateNetwork(&config); err != nil {
+		return nil, fmt.Errorf("network config: %w", err)
+	}
 
 	return &config, nil
 }
