@@ -27,16 +27,19 @@ import (
 )
 
 // pathMatchesPattern checks if a request path matches a pattern.
-// Patterns can be exact matches or use a trailing * for prefix matching.
+// Patterns can be exact matches or use a trailing * for segment-boundary prefix matching.
 // Examples:
 //   - "/v1/models" matches only "/v1/models"
 //   - "/v1/user/*" matches "/v1/user/123", "/v1/user/abc/settings", etc.
 func pathMatchesPattern(pattern, path string) bool {
-	if strings.HasSuffix(pattern, "*") {
-		prefix := strings.TrimSuffix(pattern, "*")
+	prefix, wildcard := strings.CutSuffix(pattern, "*")
+	if !wildcard {
+		return pattern == path
+	}
+	if strings.HasSuffix(prefix, "/") {
 		return strings.HasPrefix(path, prefix)
 	}
-	return pattern == path
+	return path == prefix || strings.HasPrefix(path, prefix+"/")
 }
 
 // pathAllowed checks if the request path matches any of the allowed patterns.
@@ -60,6 +63,16 @@ func requiresAuth(authenticatedEndpoints *[]string, path string) bool {
 	return pathAllowed(*authenticatedEndpoints, path)
 }
 
+// extractBearerToken returns the token portion of an Authorization header,
+// accepting any capitalization of the "Bearer" scheme.
+func extractBearerToken(header string) string {
+	const scheme = "bearer "
+	if len(header) < len(scheme) || !strings.EqualFold(header[:len(scheme)], scheme) {
+		return ""
+	}
+	return strings.TrimSpace(header[len(scheme):])
+}
+
 // OpenAI-compatible error type strings returned in API error responses.
 const (
 	errTypeInvalidRequest    = "invalid_request_error"
@@ -71,6 +84,8 @@ const (
 // where applicable. See https://platform.openai.com/docs/guides/error-codes
 const (
 	errMsgAPIKeyRequired = "API key is required."
+	errMsgInvalidAPIKey  = "Incorrect API key provided."
+	errMsgQuotaExceeded  = "Insufficient quota."
 	errMsgRateLimited    = "Rate limit reached for requests."
 	errMsgServerError    = "The server had an error while processing your request."
 )
@@ -85,6 +100,25 @@ func writeJSONError(w http.ResponseWriter, message string, errorType string, sta
 			"type":    errorType,
 		},
 	})
+}
+
+func writeValidationFailure(w http.ResponseWriter, err error) {
+	var validationErr *online.ValidationError
+	if !errors.As(err, &validationErr) {
+		writeJSONError(w, errMsgServerError, errTypeServer, http.StatusInternalServerError)
+		return
+	}
+
+	switch validationErr.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		writeJSONError(w, errMsgInvalidAPIKey, errTypeInvalidRequest, validationErr.StatusCode)
+	case http.StatusPaymentRequired:
+		writeJSONError(w, errMsgQuotaExceeded, errTypeInsufficientQuota, validationErr.StatusCode)
+	case http.StatusTooManyRequests:
+		writeJSONError(w, errMsgRateLimited, errTypeInsufficientQuota, validationErr.StatusCode)
+	default:
+		writeJSONError(w, errMsgServerError, errTypeServer, http.StatusInternalServerError)
+	}
 }
 
 func corsMiddleware(config *config.Config, next http.Handler) http.Handler {
@@ -179,7 +213,7 @@ func NewShimServer(
 	}
 
 	proxyHandler := ehbpMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		apiKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		apiKey := extractBearerToken(r.Header.Get("Authorization"))
 		if validator != nil && requiresAuth(config.AuthenticatedEndpoints, r.URL.Path) {
 			if len(apiKey) == 0 {
 				writeJSONError(w, errMsgAPIKeyRequired, errTypeInvalidRequest, http.StatusUnauthorized)
@@ -188,15 +222,7 @@ func NewShimServer(
 
 			if err := validator.Validate(apiKey); err != nil {
 				log.Printf("Warning: failed to validate API key: %v", err)
-				var validationErr *online.ValidationError
-				if errors.As(err, &validationErr) {
-					// Pass through the JSON error body from the control plane
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(validationErr.StatusCode)
-					fmt.Fprint(w, validationErr.Message)
-				} else {
-					writeJSONError(w, errMsgServerError, errTypeServer, http.StatusInternalServerError)
-				}
+				writeValidationFailure(w, err)
 				return
 			}
 		}

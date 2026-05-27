@@ -2,16 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/tinfoilsh/encrypted-http-body-protocol/identity"
+	"github.com/tinfoilsh/tinfoil-go/verifier/attestation"
 	tinfoilattestation "tinfoil/internal/attestation"
 	"tinfoil/internal/config"
-	"github.com/tinfoilsh/tinfoil-go/verifier/attestation"
 )
 
 func testServer(t *testing.T, paths []string, upstreamPort int) http.Handler {
@@ -116,6 +118,43 @@ func TestRequiresAuth(t *testing.T) {
 				t.Errorf("requiresAuth(%v, %q) = %v, want %v", tt.authenticatedEndpoints, tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestExtractBearerToken(t *testing.T) {
+	tests := []struct {
+		header string
+		want   string
+	}{
+		{"Bearer sk-test", "sk-test"},
+		{"bearer sk-test", "sk-test"},
+		{"BEARER   sk-test  ", "sk-test"},
+		{"Token sk-test", ""},
+		{"Bearer", ""},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		if got := extractBearerToken(tt.header); got != tt.want {
+			t.Errorf("extractBearerToken(%q) = %q, want %q", tt.header, got, tt.want)
+		}
+	}
+}
+
+func TestWriteValidationFailureDoesNotLeakInternalError(t *testing.T) {
+	err := errors.New("control-plane details")
+	rec := httptest.NewRecorder()
+
+	writeValidationFailure(rec, err)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), err.Error()) {
+		t.Fatalf("validation error leaked raw error: %q", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), errMsgServerError) {
+		t.Fatalf("expected generic server error, got: %q", rec.Body.String())
 	}
 }
 
