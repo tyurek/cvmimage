@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	healthPollInterval = 5 * time.Second
+	healthPollInterval       = 5 * time.Second
 	defaultPidsLimit   int64 = 65536
 )
 
@@ -37,7 +37,7 @@ func setupContainerNetwork(cli *client.Client, cfg *Config) error {
 		}
 	}
 	if shimUpstreamSet(cfg) {
-		if err := ensureNetwork(cli, containernet.ShimNetName); err != nil {
+		if err := ensureShimNetwork(cli, cfg.ShimCfg.UpstreamContainer); err != nil {
 			return err
 		}
 	}
@@ -52,16 +52,59 @@ func ensureNetwork(cli *client.Client, name string) error {
 	if !cerrdefs.IsNotFound(err) {
 		return fmt.Errorf("checking whether docker network %q exists: %w", name, err)
 	}
-	_, err = cli.NetworkCreate(context.Background(), name, dockernetwork.CreateOptions{
-		Driver: "bridge",
-		Options: map[string]string{
-			"com.docker.network.bridge.name": name,
-		},
-	})
+	_, err = cli.NetworkCreate(context.Background(), name, networkCreateOptions(name))
 	if err != nil {
 		return fmt.Errorf("creating docker network %q: %w", name, err)
 	}
 	return nil
+}
+
+func ensureShimNetwork(cli *client.Client, upstreamContainer string) error {
+	ctx := context.Background()
+	existing, err := cli.NetworkInspect(ctx, containernet.ShimNetName, dockernetwork.InspectOptions{})
+	if cerrdefs.IsNotFound(err) {
+		_, err = cli.NetworkCreate(ctx, containernet.ShimNetName, networkCreateOptions(containernet.ShimNetName))
+		if err != nil {
+			return fmt.Errorf("creating docker network %q: %w", containernet.ShimNetName, err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("checking whether docker network %q exists: %w", containernet.ShimNetName, err)
+	}
+
+	if len(existing.IPAM.Config) != 1 ||
+		existing.IPAM.Config[0].Subnet != containernet.ShimNetSubnetCIDR ||
+		existing.IPAM.Config[0].Gateway != containernet.ShimNetGatewayIP {
+		return fmt.Errorf("docker network %q must use subnet %s", containernet.ShimNetName, containernet.ShimNetSubnetCIDR)
+	}
+	if len(existing.Containers) > 1 {
+		return fmt.Errorf("docker network %q must have at most one attached container, found %d", containernet.ShimNetName, len(existing.Containers))
+	}
+	for _, c := range existing.Containers {
+		if c.Name != upstreamContainer {
+			return fmt.Errorf("docker network %q is attached to %q, want upstream container %q", containernet.ShimNetName, c.Name, upstreamContainer)
+		}
+	}
+	return nil
+}
+
+func networkCreateOptions(name string) dockernetwork.CreateOptions {
+	opts := dockernetwork.CreateOptions{
+		Driver: "bridge",
+		Options: map[string]string{
+			"com.docker.network.bridge.name": name,
+		},
+	}
+	if name == containernet.ShimNetName {
+		opts.IPAM = &dockernetwork.IPAM{
+			Config: []dockernetwork.IPAMConfig{{
+				Subnet:  containernet.ShimNetSubnetCIDR,
+				Gateway: containernet.ShimNetGatewayIP,
+			}},
+		}
+	}
+	return opts
 }
 
 // launchContainers starts all containers from the config
@@ -442,7 +485,7 @@ func createAndStartContainer(cli *client.Client, c Container, cfg *Config, extCo
 	if first != "" {
 		networkingConfig = &dockernetwork.NetworkingConfig{
 			EndpointsConfig: map[string]*dockernetwork.EndpointSettings{
-				first: {GwPriority: gwPriority(first)},
+				first: endpointSettings(first, gwPriority(first)),
 			},
 		}
 	}
@@ -453,7 +496,7 @@ func createAndStartContainer(cli *client.Client, c Container, cfg *Config, extCo
 	}
 
 	for _, n := range rest {
-		ep := &dockernetwork.EndpointSettings{GwPriority: gwPriority(n)}
+		ep := endpointSettings(n, gwPriority(n))
 		if err := cli.NetworkConnect(context.Background(), n, resp.ID, ep); err != nil {
 			return fmt.Errorf("connecting container %s to %s: %w", c.Name, n, err)
 		}
@@ -465,6 +508,16 @@ func createAndStartContainer(cli *client.Client, c Container, cfg *Config, extCo
 
 	log.Printf("Started container %s (%s)", c.Name, resp.ID[:12])
 	return nil
+}
+
+func endpointSettings(name string, gwPriority int) *dockernetwork.EndpointSettings {
+	ep := &dockernetwork.EndpointSettings{GwPriority: gwPriority}
+	if name == containernet.ShimNetName {
+		ep.IPAMConfig = &dockernetwork.EndpointIPAMConfig{
+			IPv4Address: containernet.ShimUpstreamIP,
+		}
+	}
+	return ep
 }
 
 // pullImage pulls an image using the Docker SDK with auth from Docker config
