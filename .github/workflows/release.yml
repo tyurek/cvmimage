@@ -51,7 +51,7 @@ jobs:
           echo "deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/${SNAPSHOT_DATE} resolute-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
     
           sudo apt-get update
-          sudo apt-get install -y pipx ubuntu-keyring debian-archive-keyring make jq binutils
+          sudo apt-get install -y pipx ubuntu-keyring debian-archive-keyring make jq binutils zstd
           sudo pipx install git+https://github.com/systemd/mkosi.git@54c625c380ef5500f17460981a3c67b109b6a847 #v25.3
           sudo pipx ensurepath
           mkdir -p packages mkosi.extra/usr/bin
@@ -117,15 +117,13 @@ jobs:
           }
           EOF
 
-          # Copy artifacts with versioned names
+          # Copy artifacts with versioned names. The raw is *moved* (it's ~10 GB) to
+          # save runner disk; checksums are generated later, after it is split.
           cp tinfoilcvm.initrd "/tmp/out/tinfoil-inference-${REF_NAME}.initrd"
           cp tinfoilcvm.vmlinuz "/tmp/out/tinfoil-inference-${REF_NAME}.vmlinuz"
-          cp tinfoilcvm.raw "/tmp/out/tinfoil-inference-${REF_NAME}.raw"
+          mv tinfoilcvm.raw "/tmp/out/tinfoil-inference-${REF_NAME}.raw"
 
-          # Generate checksums
           cd /tmp/out
-          sha256sum * | tee "tinfoil-inference-${REF_NAME}-checksums.sha256"
-
           echo "digest=sha256:$(sha256sum "tinfoil-inference-${REF_NAME}-manifest.json" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: Attest artifacts
@@ -137,12 +135,28 @@ jobs:
             /tmp/out/tinfoil-inference-${{ github.ref_name }}.vmlinuz
             /tmp/out/tinfoil-inference-${{ github.ref_name }}.raw
 
-      # Fork note: upstream uploads vmlinuz/initrd/raw to Cloudflare R2 (needs
-      # secrets.R2_IMAGES_*). This fork has no R2, so the artifacts measure-image-action
-      # needs (vmlinuz, initrd, manifest) are attached to the GitHub release below instead.
-      # The ~10 GB raw exceeds GitHub's 2 GB/asset limit and isn't needed to compute the
-      # measurement (dev-launch uses the local raw), so it is not uploaded; its hash is
-      # still attested via the manifest.
+      # Fork note: upstream uploads vmlinuz/initrd/raw to Cloudflare R2. This fork has no R2,
+      # so everything goes to the GitHub release. The raw (attested above) is ~10 GB > the
+      # 2 GB/asset limit, so it is zstd-compressed and split into <2 GB parts here.
+      # Reassemble on the host: cat *.raw.zst.part.* | zstd -d -o tinfoilcvm.raw
+      - name: Compress + split the raw
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          cd /tmp/out
+          RAW="tinfoil-inference-${REF_NAME}.raw"
+          zstd -3 -T0 --rm "$RAW"                         # -> $RAW.zst (rootfs is ext4, ~1.7 GB sparse)
+          split -b 1900M -d "${RAW}.zst" "${RAW}.zst.part."
+          rm -f "${RAW}.zst"
+          # Checksums over what is actually uploaded (parts, not the bare raw). The full
+          # raw's hash stays in the manifest for verification after reassembly.
+          sha256sum \
+            "tinfoil-inference-${REF_NAME}-manifest.json" \
+            "tinfoil-inference-${REF_NAME}.vmlinuz" \
+            "tinfoil-inference-${REF_NAME}.initrd" \
+            ${RAW}.zst.part.* \
+            > "tinfoil-inference-${REF_NAME}-checksums.sha256"
+          ls -la
 
       - name: Create release
         env:
@@ -162,12 +176,17 @@ jobs:
             "/tmp/out/tinfoil-inference-${REF_NAME}.initrd"
             "/tmp/out/tinfoil-inference-${REF_NAME}-checksums.sha256"
           )
+          ASSETS+=( /tmp/out/tinfoil-inference-${REF_NAME}.raw.zst.part.* )
 
           # Build release notes from the manifest (avoids inline-notes quoting issues).
           {
             echo "### Downloads (GitHub release assets)"
             echo "- Kernel: https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/tinfoil-inference-${REF_NAME}.vmlinuz"
             echo "- Initrd: https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/tinfoil-inference-${REF_NAME}.initrd"
+            echo "- Raw: zstd-compressed, split into \`…raw.zst.part.*\`. Reassemble:"
+            echo '  ```'
+            echo "  cat tinfoil-inference-${REF_NAME}.raw.zst.part.* | zstd -d -o tinfoil-inference-${REF_NAME}.raw"
+            echo '  ```'
             echo
             echo '### Manifest'
             echo '```json'
