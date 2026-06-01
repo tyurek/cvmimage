@@ -156,22 +156,34 @@ jobs:
             PRERELEASE_FLAG="--prerelease"
           fi
 
-          gh release create "$REF_NAME" \
-            -R "$REPOSITORY" \
-            $PRERELEASE_FLAG \
-            --title "$REF_NAME" \
-            --notes "### Downloads (GitHub release assets)
-          - Kernel: https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/tinfoil-inference-${REF_NAME}.vmlinuz
-          - Initrd: https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/tinfoil-inference-${REF_NAME}.initrd
-
-          ### Manifest
-          \`\`\`json
-          $(cat "/tmp/out/tinfoil-inference-${REF_NAME}-manifest.json")
-          \`\`\`" \
-            "/tmp/out/tinfoil-inference-${REF_NAME}-manifest.json" \
-            "/tmp/out/tinfoil-inference-${REF_NAME}.vmlinuz" \
-            "/tmp/out/tinfoil-inference-${REF_NAME}.initrd" \
+          ASSETS=(
+            "/tmp/out/tinfoil-inference-${REF_NAME}-manifest.json"
+            "/tmp/out/tinfoil-inference-${REF_NAME}.vmlinuz"
+            "/tmp/out/tinfoil-inference-${REF_NAME}.initrd"
             "/tmp/out/tinfoil-inference-${REF_NAME}-checksums.sha256"
+          )
+
+          # Build release notes from the manifest (avoids inline-notes quoting issues).
+          {
+            echo "### Downloads (GitHub release assets)"
+            echo "- Kernel: https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/tinfoil-inference-${REF_NAME}.vmlinuz"
+            echo "- Initrd: https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/tinfoil-inference-${REF_NAME}.initrd"
+            echo
+            echo '### Manifest'
+            echo '```json'
+            cat "/tmp/out/tinfoil-inference-${REF_NAME}-manifest.json"
+            echo '```'
+          } > /tmp/release-notes.md
+
+          # Idempotent: a release for this tag may already exist (created in the UI, or a
+          # re-run) — upload/clobber its assets instead of failing.
+          if gh release view "$REF_NAME" -R "$REPOSITORY" >/dev/null 2>&1; then
+            echo "release $REF_NAME already exists — uploading assets (--clobber)"
+            gh release upload "$REF_NAME" -R "$REPOSITORY" --clobber "${ASSETS[@]}"
+          else
+            gh release create "$REF_NAME" -R "$REPOSITORY" $PRERELEASE_FLAG \
+              --title "$REF_NAME" --notes-file /tmp/release-notes.md "${ASSETS[@]}"
+          fi
 
       # Fork note: upstream triggers update-config-repos.yml here to bump cvm-version
       # across every repo with the `tinfoil-functions` topic (i.e. tinfoilsh's). A fork
