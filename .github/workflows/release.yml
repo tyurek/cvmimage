@@ -10,12 +10,11 @@ permissions: {}
 jobs:
   release:
     name: Release
-    runs-on: large
+    runs-on: ubuntu-latest  # fork: upstream uses a self-hosted `large` runner
     permissions:
       contents: write
       id-token: write
       attestations: write
-      actions: write
 
     steps:
       - name: Check if prerelease
@@ -33,6 +32,15 @@ jobs:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
         with:
           persist-credentials: false
+
+      # fork: free ~25 GB by dropping preinstalled toolchains so the ~10 GB image build fits
+      # on a GitHub-hosted runner (no third-party action, to stay zizmor-clean).
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+                      /usr/share/dotnet /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          sudo docker image prune --all --force || true
+          df -h /
 
       - name: Install build dependencies
         run: |
@@ -165,14 +173,6 @@ jobs:
             "/tmp/out/tinfoil-inference-${REF_NAME}.initrd" \
             "/tmp/out/tinfoil-inference-${REF_NAME}-checksums.sha256"
 
-      - name: Trigger config repo updates
-        if: steps.check-prerelease.outputs.is_prerelease == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          # Strip 'v' prefix for version
-          VERSION="${REF_NAME#v}"
-
-          # Trigger the update workflow
-          gh workflow run update-config-repos.yml --field version="$VERSION"
+      # Fork note: upstream triggers update-config-repos.yml here to bump cvm-version
+      # across every repo with the `tinfoil-functions` topic (i.e. tinfoilsh's). A fork
+      # must not do that, so this step is removed and update-config-repos.yml is deleted.
