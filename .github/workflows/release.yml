@@ -129,15 +129,12 @@ jobs:
             /tmp/out/tinfoil-inference-${{ github.ref_name }}.vmlinuz
             /tmp/out/tinfoil-inference-${{ github.ref_name }}.raw
 
-      - name: Upload artifact
-        uses: ryand56/r2-upload-action@b801a390acbdeb034c5e684ff5e1361c06639e7c
-        with:
-          r2-account-id: ${{ secrets.R2_IMAGES_ACCOUNT_ID }}
-          r2-access-key-id: ${{ secrets.R2_IMAGES_ACCESS_KEY_ID }}
-          r2-secret-access-key: ${{ secrets.R2_IMAGES_SECRET_ACCESS_KEY }}
-          r2-bucket: ${{ secrets.R2_IMAGES_BUCKET }}
-          source-dir: /tmp/out
-          destination-dir: ./cvm
+      # Fork note: upstream uploads vmlinuz/initrd/raw to Cloudflare R2 (needs
+      # secrets.R2_IMAGES_*). This fork has no R2, so the artifacts measure-image-action
+      # needs (vmlinuz, initrd, manifest) are attached to the GitHub release below instead.
+      # The ~10 GB raw exceeds GitHub's 2 GB/asset limit and isn't needed to compute the
+      # measurement (dev-launch uses the local raw), so it is not uploaded; its hash is
+      # still attested via the manifest.
 
       - name: Create release
         env:
@@ -155,16 +152,17 @@ jobs:
             -R "$REPOSITORY" \
             $PRERELEASE_FLAG \
             --title "$REF_NAME" \
-            --notes "### Downloads
-          - Kernel: https://images.tinfoil.sh/cvm/tinfoil-inference-${REF_NAME}.vmlinuz
-          - Initrd: https://images.tinfoil.sh/cvm/tinfoil-inference-${REF_NAME}.initrd
-          - Disk: https://images.tinfoil.sh/cvm/tinfoil-inference-${REF_NAME}.raw
+            --notes "### Downloads (GitHub release assets)
+          - Kernel: https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/tinfoil-inference-${REF_NAME}.vmlinuz
+          - Initrd: https://github.com/${REPOSITORY}/releases/download/${REF_NAME}/tinfoil-inference-${REF_NAME}.initrd
 
           ### Manifest
           \`\`\`json
           $(cat "/tmp/out/tinfoil-inference-${REF_NAME}-manifest.json")
           \`\`\`" \
             "/tmp/out/tinfoil-inference-${REF_NAME}-manifest.json" \
+            "/tmp/out/tinfoil-inference-${REF_NAME}.vmlinuz" \
+            "/tmp/out/tinfoil-inference-${REF_NAME}.initrd" \
             "/tmp/out/tinfoil-inference-${REF_NAME}-checksums.sha256"
 
       - name: Trigger config repo updates
